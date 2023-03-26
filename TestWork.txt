@@ -1,0 +1,134 @@
+import threading
+import pandas
+import os
+
+
+class InputTaskN1:
+    def __init__(self,data_dir,out_file_name):
+        
+        self.data_dir=data_dir # path 2 "data" folder
+        self.input_dir=data_dir+'\\data\\clicks\\' 
+        self.output_dir=data_dir+'\\data\\'+ out_file_name 
+    
+    def udf_map(self,file_name,df_obj):
+        """
+        Input:
+            key: file_name - txt - name of the file in folder (i.e. 'part-004.csv')
+                
+            value: df_obj -  DataFrame object - generated from "file_name" csv file  
+        
+        Output: DataFrame object with key column 'date' consisting of lists ['some-date'] and value column 'index'  consisting of '1' strings
+        """
+       
+        df_obj['date']=df_obj['date'].map(lambda x: [x]) # each date in column -> [date] according to MapReduceSmpl spec
+        
+        df_obj['index'] = "1" 
+        
+        return df_obj[['date','index']]
+    
+    def udf_reduce(self, list_of_vals, list_of_index):
+        """
+        Input:
+        key: list_of_vals - txt - python list text representation (['13.12.2017'] or '['13.12.2017', 4, 'ad']')
+        value: list_of_index -  list - list of strings '1' 
+        
+        Output: list key appended by sum of "values"
+        """
+        list_of_vals=eval(list_of_vals) #converts string to the python list
+
+        s=sum([int(i) for i in list_of_index])
+        
+        list_of_vals.append(str(s))
+
+        return  list_of_vals
+    
+    
+
+class InputTaskN2(InputTaskN1):
+    
+    def __init__(self,data_dir,out_file_name):
+        
+        super().__init__(data_dir,out_file_name)
+        
+    
+    def udf_map(self,file_name,df_obj):
+        
+        """
+        Input:
+            key: file_name - txt - name of the file in folder (i.e. 'part-004.csv')
+                
+            value: df_obj -  DataFrame object - generated from "file_name" csv file  
+        
+        Output: DataFrame object with key column consisting of lists of click attributes belonging to LT region and value 'index'  consisting of '1' strings
+        """
+        
+        users_dir=self.data_dir+'\\data\\users\\'
+        
+        in_files=[users_dir + i for i in os.listdir(users_dir)]
+        
+        ids= pandas.concat(map(lambda x: pandas.read_csv(x,delimiter=";",header=1,usecols=['id','country']), in_files),ignore_index=True)
+        
+        ids=ids[ids['country']=='LT']        
+
+        df_obj=df_obj[['date','user_id','click_target']]
+        df_obj=df_obj[df_obj['user_id'].isin(ids['id'])]
+       
+        df_obj=pandas.DataFrame({0: df_obj.values.tolist()})
+        df_obj['index'] = "1"
+        
+        return df_obj
+
+    
+class MapReduceSimple:
+    
+    def __init__(self, io):
+
+        self.io=io # loading  map and reduce functions
+        
+        self.prepare_files() #prepare iput files list and erases Intermediate.csv
+        
+        self.run_map_threads() # run threads corresponding to each input data file
+
+        self.reduce_and_write() # reads from Intermediate.csv, do reduce and write to output 
+        
+
+    def prepare_files (self):
+        
+        self.in_files=[self.io.input_dir+ i for i in os.listdir(self.io.input_dir)] #list of input files
+        
+        self.intm_file=self.io.data_dir+'\\data\\Intermediate.csv' #  intermediate file
+        
+        if os.path.isfile(self.intm_file): os.remove(self.intm_file)  # remove historical records
+
+    
+    def apply_map (self,file_name):
+        
+        df = pandas.read_csv(file_name,delimiter=";",header=1)
+        
+        df=self.io.udf_map(file_name,df)
+
+        df.to_csv(self.intm_file,index=False,mode='a',sep=';',header=False)
+        
+        
+    def run_map_threads (self):
+        
+        map_threads_obj=list(map(lambda s: Thread(target=self.apply_map, args=(s,)), self.in_files)) # run Threads for each file
+        
+        map_threads_start=list(map(lambda s: s.start(),map_threads_obj))
+        
+        map_threads_join=list(map(lambda s: s.join(),map_threads_obj))
+    
+    
+    def reduce_and_write(self):
+        
+        df = pandas.read_csv(self.intm_file,delimiter=";",header=None)
+        
+        df=df.groupby(df[0]).agg(list).reset_index()
+        
+        df=df.apply(lambda x: self.io.udf_reduce(*x),axis=1)
+        
+        pandas.DataFrame(df.tolist()).to_csv(self.io.output_dir,index=False,sep=';',header=False)
+
+        
+task1=MapReduceSimple(InputTaskN1('D:\\Dzmitry\\TW','total_clicks.csv'))
+task2=MapReduceSimple(InputTaskN2('D:\\Dzmitry\\TW','filtered_clicks.csv'))
